@@ -1,0 +1,91 @@
+// Touch-Test: ESP32 + MPR121 auf dem Breadboard
+// Verdrahtung: 3V3 -> VIN, GND -> GND, GPIO21 -> SDA, GPIO22 -> SCL
+// Elektroden (Draht/Kupferfolie) an die Pins 0..11 des MPR121-Boards.
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_MPR121.h>
+
+#define PIN_SDA 21
+#define PIN_SCL 22
+
+Adafruit_MPR121 cap;
+uint16_t letzterStatus = 0;
+uint8_t mprAdresse = 0;
+
+void i2cScan() {
+  Serial.println("I2C-Scan ...");
+  uint8_t gefunden = 0;
+  for (uint8_t a = 1; a < 127; a++) {
+    Wire.beginTransmission(a);
+    if (Wire.endTransmission() == 0) {
+      Serial.printf("  Gerät bei 0x%02X\n", a);
+      if (a >= 0x5A && a <= 0x5D && mprAdresse == 0) mprAdresse = a;
+      gefunden++;
+    }
+  }
+  if (gefunden == 0) {
+    Serial.println("  Nichts gefunden. SDA/SCL, VIN und GND prüfen.");
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+  Serial.println("\n=== Touch-Test MPR121 ===");
+
+  // Leitungstest: Das Modul hat Pull-ups, SDA/SCL müssen ohne ESP32-Pull-up HIGH sein
+  pinMode(PIN_SDA, INPUT);
+  pinMode(PIN_SCL, INPUT);
+  delay(10);
+  Serial.printf("Leitungstest: SDA=%s  SCL=%s\n",
+                digitalRead(PIN_SDA) ? "HIGH" : "LOW",
+                digitalRead(PIN_SCL) ? "HIGH" : "LOW");
+
+  // Mit ESP32-Pull-up: bleibt eine Leitung LOW, zieht etwas sie nach GND
+  pinMode(PIN_SDA, INPUT_PULLUP);
+  pinMode(PIN_SCL, INPUT_PULLUP);
+  delay(10);
+  Serial.printf("Mit Pull-up:  SDA=%s  SCL=%s\n",
+                digitalRead(PIN_SDA) ? "HIGH" : "LOW",
+                digitalRead(PIN_SCL) ? "HIGH" : "LOW");
+
+  Wire.begin(PIN_SDA, PIN_SCL);
+  Wire.setClock(10000);   // langsamer Takt, verzeiht wackelige Breadboard-Kontakte
+  i2cScan();
+
+  if (mprAdresse == 0) mprAdresse = 0x5A;   // Standardadresse (ADDR an GND)
+  if (!cap.begin(mprAdresse, &Wire)) {
+    Serial.printf("MPR121 nicht gefunden (0x%02X). Verkabelung prüfen!\n", mprAdresse);
+    while (true) delay(1000);
+  }
+  Serial.printf("MPR121 gefunden bei 0x%02X. Elektroden berühren ...\n", mprAdresse);
+}
+
+void loop() {
+  uint16_t status = cap.touched();
+
+  for (uint8_t i = 0; i < 12; i++) {
+    uint16_t bit = 1 << i;
+    if ((status & bit) && !(letzterStatus & bit)) {
+      Serial.printf("Pin %2u berührt\n", i);
+    }
+    if (!(status & bit) && (letzterStatus & bit)) {
+      Serial.printf("Pin %2u losgelassen\n", i);
+    }
+  }
+  letzterStatus = status;
+
+  // Rohwerte alle 2 s: gefiltert sinkt bei Berührung deutlich unter die Baseline
+  static uint32_t letzteAusgabe = 0;
+  if (millis() - letzteAusgabe > 2000) {
+    letzteAusgabe = millis();
+    Serial.print("Gefiltert: ");
+    for (uint8_t i = 0; i < 12; i++) Serial.printf("%4u ", cap.filteredData(i));
+    Serial.print("\nBaseline:  ");
+    for (uint8_t i = 0; i < 12; i++) Serial.printf("%4u ", cap.baselineData(i));
+    Serial.println();
+  }
+
+  delay(20);
+}
